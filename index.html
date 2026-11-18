@@ -570,25 +570,120 @@ function openMenu(){
   pushLayer(`<div class="ptitle">Cat<span class="green">U</span> · catat uang</div><div class="menu">
     <button onclick="swap(openRecurring)">${icon('repeat','#1f7a8c')}<span>Recurring<small>Weekly, monthly and yearly items</small></span></button>
     <button onclick="refreshRates(true).then(()=>popLayer())">${icon('refresh-cw','#2f6690')}<span>Update exchange rates<small>${r?`Updated ${new Date(r.t).toLocaleString()}${usd?` · 1 USD = ${fmtRate(usd)}`:''}`:'Not loaded yet'}</small></span></button>
-    <button onclick="exportCSV()">${icon('file-spreadsheet','#4c9f86')}<span>Export to CSV<small>Opens in Excel or Google Sheets</small></span></button>
+    <button onclick="exportCSV()">${icon('file-spreadsheet','#4c9f86')}<span>Export to CSV<small>Same layout as MyMoney Pro's export</small></span></button>
     <button onclick="backup()">${icon('download','#1b3a5c')}<span>Backup<small>Download all your data as a file</small></span></button>
-    <button onclick="restore()">${icon('upload','#f0a33a')}<span>Restore<small>Load a backup file</small></span></button>
+    <button onclick="restore()">${icon('upload','#f0a33a')}<span>Restore or import<small>CatU backup (.json) or MyMoney / CatU CSV</small></span></button>
     <button onclick="confirmBox('Delete ALL data? This cannot be undone.',()=>{S=DEFAULT();save();popLayer();render();toast('All data deleted')})">${icon('trash-2','#c9533e')}<span class="red">Delete all data</span></button>
   </div><div class="hint" style="margin-top:12px">Your data is saved only on this phone, inside this app. Make a backup now and then, and before you change phones or clear Chrome's data.</div>`);
 }
 function download(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
 function backup(){download(`catu-backup-${today()}.json`,JSON.stringify(S),'application/json');toast('Backup downloaded')}
+/* CSV in the same layout as MyMoney Pro's "Export Report":
+   "TIME","TYPE","AMOUNT","CATEGORY","ACCOUNT","NOTES"  e.g. "Nov 01, 2025 12:51 PM","(-) Expense","766200.00","Home","HSBC premier",""
+   Transfers: TYPE "(*) Transfer", CATEGORY "Transfer to <account>".
+   Foreign currency: AMOUNT is in IDR; NOTES end with a tag like [USD 12.99 @ 16250] so CatU can read it back. */
+function csvTime(t){const d=parse(t.date),[H,M]=(t.time||'00:00').split(':').map(Number);return `${MON3[d.getMonth()]} ${pad(d.getDate())}, ${d.getFullYear()} ${(H%12)||12}:${pad(M)} ${H<12?'AM':'PM'}`}
 function exportCSV(){
   const q=v=>`"${String(v??'').replace(/"/g,'""')}"`;
-  const rows=[['Date','Time','Type','Category','Account','To account','Amount','Currency','Rate to IDR','Amount IDR','Note','Recurring']];
-  [...S.txns].sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time)).forEach(t=>rows.push([t.date,t.time,t.type,t.type==='transfer'?'':catOf(t.categoryId).name,accOf(t.accountId).name,t.toAccountId?accOf(t.toAccountId).name:'',t.amount,t.currency,t.rate,Math.round(t.base),t.note,t.recurringId?'yes':'']));
-  download(`catu-${today()}.csv`,'﻿'+rows.map(r=>r.map(q).join(',')).join('\n'),'text/csv');toast('CSV downloaded');
+  const rows=[['TIME','TYPE','AMOUNT','CATEGORY','ACCOUNT','NOTES']];
+  [...S.txns].sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time)).forEach(t=>{
+    const type=t.type==='expense'?'(-) Expense':t.type==='income'?'(+) Income':'(*) Transfer';
+    const cat=t.type==='transfer'?'Transfer to '+accOf(t.toAccountId).name:catOf(t.categoryId).name;
+    let note=t.note||'';if(t.currency!=='IDR')note=(note?note+' ':'')+`[${t.currency} ${t.amount} @ ${Math.round(t.rate*10000)/10000}]`;
+    rows.push([csvTime(t),type,t.base.toFixed(2),cat,accOf(t.accountId).name,note]);
+  });
+  const n=new Date();
+  download(`catu_export_${pad(n.getDate())}_${pad(n.getMonth()+1)}_${String(n.getFullYear()).slice(2)}.csv`,rows.map(r=>r.map(q).join(',')).join('\n')+'\n','text/csv');
+  toast(`CSV downloaded (${rows.length-1} records)`);
+}
+function parseCSV(text){
+  const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"')q=true;
+    else if(c===','){row.push(f);f=''}
+    else if(c==='\n'||c==='\r'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(f);rows.push(row);row=[];f=''}
+    else f+=c;
+  }
+  if(f!==''||row.length){row.push(f);rows.push(row)}
+  return rows.map(r=>r.map(x=>x.trim())).filter(r=>r.some(x=>x));
+}
+const MONIDX={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11,mei:4,agu:7,agt:7,okt:9,des:11};
+function parseCsvTime(s){
+  let m=s.match(/^([A-Za-z]{3})[a-z]*\.? (\d{1,2}),? (\d{4})(?: (\d{1,2})[:.](\d{2})(?::\d{2})? ?([AaPp][Mm])?)?$/);
+  if(m&&MONIDX[m[1].toLowerCase()]!=null){
+    let H=+(m[4]||0);const ap=(m[6]||'').toUpperCase();if(ap==='PM'&&H<12)H+=12;if(ap==='AM'&&H===12)H=0;
+    return{date:`${m[3]}-${pad(MONIDX[m[1].toLowerCase()]+1)}-${pad(+m[2])}`,time:`${pad(H)}:${m[5]||'00'}`};
+  }
+  m=s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+  if(m)return{date:`${m[1]}-${m[2]}-${m[3]}`,time:`${m[4]||'00'}:${m[5]||'00'}`};
+  return null;
+}
+function guessIcon(name,kind){
+  const n=name.toLowerCase(),has=(...w)=>w.some(x=>n.includes(x));
+  if(kind==='account'){
+    if(has('cash','tunai'))return'banknote';if(has('saving','tabungan'))return'piggy-bank';if(has('invest','saham','reksa'))return'trending-up';
+    if(has('gopay','ovo','dana','shopee','wallet','linkaja'))return'smartphone';
+    if(has('kredit','credit','premier','jcb','visa','master','card'))return'credit-card';return'landmark';
+  }
+  const map=[['repay','hand-coins'],['grant','gift'],['hibah','gift'],['salary','banknote'],['gaji','banknote'],['bonus','trophy'],['invest','trending-up'],['dividen','trending-up'],['refund','undo-2'],['interest','coins'],['bunga','coins'],['coffee','coffee'],['kopi','coffee'],['grocer','shopping-cart'],['belanja','shopping-cart'],['pet','paw-print'],['baby','baby'],['anak','baby'],['insur','shield-check'],['asuransi','shield-check'],['tax','receipt'],['pajak','receipt'],['charity','hand-heart'],['zakat','hand-heart'],['donat','hand-heart'],['fuel','fuel'],['bensin','fuel'],['parking','circle-parking'],['parkir','circle-parking'],['book','book-open'],['travel','plane']];
+  for(const[k,v]of map)if(n.includes(k))return v;return'tag';
+}
+function importCSVText(text){
+  const rows=parseCSV(text.replace(/^﻿/,''));
+  if(rows.length<2)return toast('This CSV file is empty');
+  const h=rows[0].map(x=>x.toUpperCase()),ix=k=>h.indexOf(k);
+  const I={t:ix('TIME'),ty:ix('TYPE'),a:ix('AMOUNT'),c:ix('CATEGORY'),ac:ix('ACCOUNT'),n:ix('NOTES')};
+  if(I.t<0||I.ty<0||I.a<0||I.ac<0)return toast('This CSV needs the columns TIME, TYPE, AMOUNT, CATEGORY, ACCOUNT, NOTES');
+  const key=s=>s.trim().toLowerCase();
+  const accBy={},catBy={};S.accounts.forEach(a=>accBy[key(a.name)]=a);S.categories.forEach(c=>catBy[c.type+':'+key(c.name)]=c);
+  const newAcc=[],newCat=[];let ci=0;
+  const getAcc=name=>{const k=key(name);if(!accBy[k]){const a={id:uid(),name:name.trim(),icon:guessIcon(name,'account'),color:COLORS[(ci++*7+9)%COLORS.length],initial:0};accBy[k]=a;newAcc.push(a)}return accBy[k]};
+  const getCat=(name,type)=>{const k=type+':'+key(name||'Other');if(!catBy[k]){const c={id:uid(),name:(name||'Other').trim(),icon:guessIcon(name||'',type),color:COLORS[(ci++*7+3)%COLORS.length],type};catBy[k]=c;newCat.push(c)}return catBy[k]};
+  const sig=(date,time,type,base,a,c,note)=>[date,time,type,Math.round(base),key(a),key(c),key(note)].join('|');
+  const seen=new Set(S.txns.map(t=>sig(t.date,t.time,t.type,t.base,accOf(t.accountId).name,t.type==='transfer'?'transfer to '+accOf(t.toAccountId).name:catOf(t.categoryId).name,t.note||'')));
+  const out=[];let dup=0,bad=0;
+  for(const r of rows.slice(1)){
+    const tm=parseCsvTime(r[I.t]||''),tyS=(r[I.ty]||'').toLowerCase(),base=num((r[I.a]||'').replace(/[^\d.,-]/g,''));
+    const type=tyS.includes('transfer')||tyS.includes('(*)')?'transfer':tyS.includes('income')||tyS.includes('(+)')||tyS.includes('pemasukan')?'income':tyS.includes('expense')||tyS.includes('(-)')||tyS.includes('pengeluaran')?'expense':null;
+    const accName=r[I.ac]||'',catName=I.c>=0?r[I.c]||'':'';let note=I.n>=0?(r[I.n]||'').replace(/\s*\n\s*/g,' ').trim():'';
+    if(!tm||!type||!(Math.abs(base)>0)||!accName){bad++;continue}
+    let toName=null;if(type==='transfer'){const m=catName.match(/^transfer to (.+)$/i);if(!m){bad++;continue}toName=m[1]}
+    if(seen.has(sig(tm.date,tm.time,type,Math.abs(base),accName,catName,note))){dup++;continue}
+    seen.add(sig(tm.date,tm.time,type,Math.abs(base),accName,catName,note));
+    let currency='IDR',amount=Math.abs(base),rate=1;
+    const fx=note.match(/\s*\[([A-Z]{3}) ([\d.]+) @ ([\d.]+)\]$/);
+    if(fx){currency=fx[1];amount=+fx[2];rate=+fx[3];note=note.slice(0,fx.index).trim()}
+    const t={id:uid(),type,date:tm.date,time:tm.time,accountId:getAcc(accName).id,toAccountId:toName?getAcc(toName).id:null,categoryId:type==='transfer'?null:getCat(catName,type).id,amount,currency,rate,base:Math.abs(base),note};
+    out.push(t);
+  }
+  if(!out.length)return toast(dup?`Nothing new: all ${dup} records are already in CatU`:'No records could be read from this file');
+  const dates=out.map(t=>t.date).sort(),cnt=k=>out.filter(t=>t.type===k).length;
+  const L=pushLayer(`<div class="ptitle">Import CSV</div>
+    <div class="card" style="display:block"><div class="t" style="font-size:20px;color:var(--navy)">${out.length.toLocaleString('en-US')} records to add</div>
+    <div class="s">${fmtD(dates[0])} – ${fmtD(dates[dates.length-1])}</div>
+    <div class="s">${cnt('expense')} expenses · ${cnt('income')} income${cnt('transfer')?` · ${cnt('transfer')} transfers`:''}</div></div>
+    ${newAcc.length?`<label class="lab">New accounts (${newAcc.length})</label><div>${newAcc.map(a=>`<div class="row" style="padding:6px 0">${icon(a.icon,a.color,'sq','width:34px;height:34px')}<div class="mid t">${esc(a.name)}</div></div>`).join('')}</div>`:''}
+    ${newCat.length?`<label class="lab">New categories (${newCat.length})</label><div>${newCat.map(c=>`<div class="row" style="padding:6px 0">${icon(c.icon,c.color,'','width:34px;height:34px')}<div class="mid t">${esc(c.name)} <span class="s">${c.type}</span></div></div>`).join('')}</div>`:''}
+    ${dup||bad?`<div class="hint">${dup?`${dup} already in CatU, skipped. `:''}${bad?`${bad} rows couldn't be read, skipped.`:''}</div>`:''}
+    <div class="hint">MyMoney's export has no starting balances, so account balances can differ. Set each account's <b>Initial amount</b> in Accounts to match.</div>
+    <div class="row2" style="margin-top:16px;justify-content:flex-end"><button class="btn" onclick="popLayer()">CANCEL</button><button class="btn solid" id="impok">IMPORT</button></div>`);
+  L.querySelector('#impok').onclick=()=>{
+    S.accounts.push(...newAcc);S.categories.push(...newCat);S.txns.push(...out);save();
+    while(layers.length)popLayer();const d=parse(dates[dates.length-1]);cur={y:d.getFullYear(),m:d.getMonth()};tab='records';render();
+    toast(`${out.length} records imported`);
+  };
 }
 function restore(){
-  const i=document.createElement('input');i.type='file';i.accept='application/json,.json';
-  i.onchange=async()=>{try{const d=JSON.parse(await i.files[0].text());if(!d.accounts||!d.categories||!d.txns)throw 0;
-    confirmBox(`Replace your current data with this backup (${d.txns.length} records)?`,()=>{S=Object.assign(DEFAULT(),d);save();while(layers.length)popLayer();render();toast('Backup restored')},'RESTORE');
-  }catch(e){toast('That is not a CatU backup file')}};
+  const i=document.createElement('input');i.type='file';i.accept='.json,.csv,application/json,text/csv,text/comma-separated-values';
+  i.onchange=async()=>{
+    const f=i.files[0];if(!f)return;const text=await f.text();
+    if(/\.csv$/i.test(f.name)||/^﻿?"?TIME"?,/i.test(text))return swap(()=>importCSVText(text));
+    try{const d=JSON.parse(text);if(!d.accounts||!d.categories||!d.txns)throw 0;
+      confirmBox(`Replace your current data with this backup (${d.txns.length} records)?`,()=>{S=Object.assign(DEFAULT(),d);save();while(layers.length)popLayer();render();toast('Backup restored')},'RESTORE');
+    }catch(e){toast('That is not a CatU backup or CSV file')}
+  };
   i.click();
 }
 

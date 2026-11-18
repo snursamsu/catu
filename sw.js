@@ -1,5 +1,5 @@
 // Network-first for the app's own files (so updates arrive), cache fallback when offline.
-const CACHE = 'catu-v1';
+const CACHE = 'catu-v2';
 const ASSETS = ['./', './index.html', './manifest.json', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', e => {
